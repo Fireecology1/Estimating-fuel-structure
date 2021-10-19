@@ -1,1 +1,1 @@
-
+In this repository, I'm posting the details of analyses for estimating the detailed fuel structure (primarily Live Canopy Base Height, LCBH) of various 20th century experimental burns conducted by the Canadian Forest Service. 
