@@ -1,0 +1,525 @@
+---
+title: "Kenshoe Lake Stand Structure"
+author: "Dan Perrakis, Chelene Hanes, and Brian Stocks"
+date: "September, 2021"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+.libPaths("C:/Dan/RPackages")
+knitr::opts_chunk$set(echo = TRUE)
+setwd('C:/Dan/_Remote_projects/ccp_2021/analysis')
+
+require(Hmisc)
+require(dplyr)
+require(stringr)
+require(lubridate)
+require(readxl)
+require(ggplot2)
+require(nls2)
+require(imager)
+
+#get biomass tree data, pine and spruce
+lcbh.data <- read.csv('./fuel_structure_calcs/Ken_jp_data.csv') %>%
+  mutate(CD=Ht.m-LCBH.m, CR=CD/Ht.m)
+
+bs.data <- read.csv('./fuel_structure_calcs/Ken_bs_data.csv')
+
+#plot data
+jp.data <- read.csv('./data/cruise.csv')
+spruce.data <- read.csv('./data/spruce.csv')
+
+#Prepare biomass data - spruce
+bs.data$DSH.cm <- bs.data$DSH.in * 2.54
+bs.data$tree.size <- NA
+bs.data$tree.size[1:17] <- 2
+bs.data$tree.size[18:35] <- 1
+
+bs.data.small<- filter(bs.data, tree.size == 1) %>%
+  mutate(DBH.cm=NA) %>% select(Tree, DSH.cm, DBH.cm, Ht.m, tree.size)
+bs.data.big <-filter(bs.data, tree.size == 2) %>% select(Tree, DSH.cm, DBH.cm,
+                                                          Ht.m, tree.size)
+```
+
+##Part 1: Modelling Height and LCBH from Biomass Data
+
+This is an analysis of tree biomass and cruise data from the classic Kenshoe Lake, ON study of fire behaviour in mature jack pine and black spruce stands (Stocks 1989). These data were collected in the 1970s prior to burning, but never published or fully analyzed, although considerable summary information was presented by Walker and Stocks (1975). The fire behaviour results have been incorporated into several important models and suites, including the C-3 'Mature jack pine' FBP System fuel type model (Forestry Canada Fire Danger Group 1992), Van Wagner's (1993) study of crown fire dynamics in two pine stands (discussed further below), and also reanalyzed as part of the CFIS studies (Alexander and Cruz 2006; Cruz et al. 2003, 2004). However, plot-level fuel structure was never examined in detail, with the notable exception of crown fuel weights in Stocks (1989). 
+
+The present objective was estimating plot-level stand structure, particularly the live canopy base height (lcbh) and fuel strata gap (FSG; see below) for use in further crown fire modelling analyses, notably the 'Conifer Pyrometrics' modelling system (Perrakis et al. 2020). The level of depth and precision of the available data lend themselves to more detailed fuel structure analyses than have previously been presented. 
+
+The stand composition consisted of distinct cohorts: black spruce understory and mid-story, and jack pine overstory. These were first analyzed separately from the perspective of biomass and height-dbh relationships, and then combined to estimate overall stand structure parameters for further fire behaviour modelling. 
+
+### Black Spruce Mid-Story and Understory
+
+Spruce measurements were collected from `r nrow(bs.data.small)` saplings (< 1.8 m height) and `r nrow(bs.data.big)` larger trees. Mid-story spruce individuals had DBH between `r round(min(bs.data.big$DBH.cm), 2)` and `r round(max(bs.data.big$DBH.cm), 2)` cm, while sapling diameter was measured at stump height (DSH). DSH ranged from `r round(min(bs.data.small$DSH.cm), 2)`-`r round(max(bs.data.small$DSH.cm), 2)` cm. 
+
+To combine the datasets for a general spruce height model, we first had to estimated DBH from DSH for the saplings; this was only meaningful for trees at least breast height (~1.3m) or greater. A simple linear model was highly significant:
+
+```{r echo=FALSE}
+bs.dsh <- lm(DBH.cm ~ DSH.cm, data=bs.data.big)
+
+fun.bs.dsh <- function(x) {
+  predict(bs.dsh, newdata=list(DSH.cm=x))
+}
+
+ggplot(bs.data.big, aes(x=DSH.cm, y=DBH.cm))+
+  geom_point()+
+  stat_function(fun=fun.bs.dsh)+
+  geom_text(label=paste("DBH=",round(coef(bs.dsh)[1], 3),"+", 
+                          round(coef(bs.dsh)[2], 3), "* DSH, ", 
+                          "r^2=", round(summary(bs.dsh)$r.squared, 3)), 
+              x=Inf, y=-Inf, hjust=1.1, vjust=-0.5)
+```
+
+This model was then used to predict DBH for the taller saplings, those with a meaningful DBH (ie, above 1.3 m tree height). The datasets were then combined to build the black spruce height model for plot-level predictions.  
+
+```{r echo=FALSE}
+#predict DBH for saplings, eliminate those with a negative DBH
+bs.data.small <- mutate(bs.data.small, 
+                        DBH.cm=predict(bs.dsh, newdata=list(DSH.cm=DSH.cm))) %>%
+  filter(DBH.cm > 0)
+
+bs.data.all <- rbind(bs.data.small, bs.data.big)
+bs.data.all$tree.size <- as.factor(bs.data.all$tree.size)
+```
+
+Height-diameter relationships have long been studied by foresters, and with adequate data, the best results appear to be from relatively complex non-linear mixed-effects models representing the sigmoidal relationship between dbh and height across all tree sizes. After some consideration of simpler models, we ultimately used Sharma and Parton's (2007) Chapman-Richards mixed-effect model of height, using parameters for black spruce and jack pine. This model form allows the use of local data, including both fixed stand conditions as well as a random site quality variable, to calibrate stand relationships. 
+
+The form of the height equation is as follows (Sharma and Parton 2007):
+
+h = 1.3 + (theta + u)*SHT^delta * [1-exp(-beta*((SPH/BA)^phi)*DBH)]^gamma ,
+
+where SHT, TPH, BA, and DBH represent stand height, density (stems per ha), basal area, and diameter at breast height, respectively; theta, beta, gamma, and phi are species-dependent model parameters, while u is the site-dependent random variable. Stand height in this context represents the average of all dominant and sub-dominant trees in a given stand. 
+
+Overall stand characteristics are used as input parameters (from Walker and Stocks 1975): 
+
+Stand height (average height of dominants and sub-dominants): 
+spruce: 8.0 m (estimated); pine: 17.7 m
+
+Density: 
+2590 s/ha
+
+Basal area: 
+33.9 m^2/ha (29.7 pine + 4.2 spruce, calculated from plot data)
+
+The black spruce basal area was calculated from the plot data, since Walker and Stocks (1975) did not report overall stand BA for spruce. And the 8 m overall stand height for spruce was estimated from plot data. Note that these values are only used to help fit the random site parameter for the Sharma and Parton (2007) model.  
+
+The 'u' parameter in Sharma and Parton's model was fitted separately to the black spruce and jack pine biomass tree data. For the spruce data, the model coefficient summary below shows that the u factor was highly significant. The figure below shows the combined spruce biomass data along with the fitted spruce height model. Note that the Chapman-Richards equation form forces the line through an origin point (through the y-intercept, in this case, set to 1.3 m), since DBH is only meaningful for trees above that height. 
+
+```{r echo=FALSE}
+#black spruce height model
+#Changed to Ch-Rich Sharma model, with random factor
+
+#black spruce
+theta2=3.3952
+delta2=0.6390
+beta2=0.0424
+phi2=0.1380
+gamma2=1.2948
+sig.sq2=1.4306
+
+bs.mod <- rename(bs.data.all, dbh=DBH.cm, ht=Ht.m) %>%
+  filter(ht >= 1.3)
+
+sht=8
+tph=2590
+ba=33.9
+#was 18 and 35
+
+bs.Chap <- nls(ht ~ 1.3 + (theta2 + u)*sht^delta2 * (1-exp(-beta2*((tph/ba)^phi2)*dbh))^gamma2, 
+               start=list(u=-1), data=bs.mod) 
+
+
+
+sharma.bs <- function(x) {
+  predict(bs.Chap, newdata=list(dbh=x))
+}
+
+summary(bs.Chap)$coef
+
+#save(sharma.bs, 'c:/Dan/_Remote_projects/ccp_2020/analysis/models_outputs/sharma_bs')
+u_bs <- summary(bs.Chap)$coef[[1]]
+
+
+ggplot(bs.data.all %>% filter(Ht.m > 1.3) %>%
+         mutate(tree.size2=if_else(tree.size==1, "Saplings (modelled)", "Trees"))) +
+  geom_point(aes(x=DBH.cm, y=Ht.m, colour=tree.size2)) +
+  stat_function(inherit.aes=TRUE, fun=sharma.bs, colour='black', n=200) +
+  labs(x='DBH', y='Height (m)', title='Black spruce')+
+  expand_limits(x=c(0, 20))
+#  geom_text(label=paste("H=",round(coef(bs.mod.qu)[1], 3),"+", 
+#          round(coef(bs.mod.qu)[2], 3), "* DBH +", 
+#          round(coef(bs.mod.qu)[3],3), "* DBH^2, ", 
+#          "r^2=", round(summary(bs.mod.qu)$r.squared, 3)), 
+#              x=Inf, y=-Inf, hjust=1.1, vjust=-0.5)
+
+```
+
+
+Unfortunately, no measurements of LCBH were collected from the spruce cohorts. Based on advice from the original research team (B.J. Stocks, personal communication, 2020) supported by evidence from several in-stand photographs, we estimated stand-level LCBH at 0.5 m (see figure below,  deGroot et al. 1993). As discussed below, this value (LCBH=0.5 m) is used when making a 'combined' or 'whole stand' LCBH estimate, but is not needed for calculating the fuel strata gap. 
+
+
+![Kenshoe structure 1](C:/Dan/_Remote_projects/ccp_2021/analysis/markdown_docs/kenshoe1.png)
+
+
+###Jack Pine Overstory: Height
+
+For the overstory jack pines, the biomass data were concentrated in mid-sized and larger trees, and included measured height and LCBH data for `r nrow(lcbh.data)` individuals.
+
+Once again, we fitted the 'u' parameter in Sharma and Parton's (2007) height equation to the available pine measurements, with an overall stand height of 17.7 m (Walker and Stocks 1975).    
+
+
+```{r echo=FALSE}
+jp.mod <- rename(lcbh.data, ht=Ht.m, dbh=DBH.cm)
+
+#params jp (random):
+theta1=1.1583
+delta1=0.9721
+beta1=0.0401
+phi1=0.2289
+gamma1=0.9399
+sig.sq1=1.1421
+
+sht=17.7
+tph=2590
+ba=33.9
+
+jp.Chap <- nls(ht ~ 1.3 + (theta1 + u)*sht^delta1 * (1-exp(-beta1*((tph/ba)^phi1)*dbh))^gamma1, 
+               start=list(u=-1), data=jp.mod)
+
+sharma.jp <- function(x) {
+  predict(jp.Chap, newdata=list(dbh=x))
+}
+
+summary(jp.Chap)$coef
+
+#save(sharma.jp, 'c:/Dan/_Remote_projects/ccp_2020/analysis/models_outputs/sharma_jp')
+u_jp <- summary(jp.Chap)$coef[[1]]
+
+
+```
+
+The fitted model term was again highly significant, suggesting local site calibration was meaningful. 
+
+###Jack Pine LCBH
+
+One of the key questions with respect to LCBH across different sizes of trees is the variability in the crown ratio: (H-LCBH)/H. In the biomass trees, the mean crown ratio (CR) in the pine individuals was `r lcbh.data %>% summarize(mean(CR)) %>% round(3)`. A Pearson correlation test showed little relationship between DBH and CR across the range of data (cor = 0.189; P > 0.3), and this is apparent from the scatter plot. 
+
+```{r echo=FALSE}
+cor.test(lcbh.data$DBH.cm, lcbh.data$CR)
+
+cr.mod <-lm(CR~DBH.cm, data=lcbh.data)
+ 
+lcbh.sharma.cr <- function(x) {
+ sharma.jp(x)-mean(lcbh.data$CR)*sharma.jp(x)
+}
+
+lcbh.cr <- function(ht) {
+  ht-mean(lcbh.data$CR)*ht
+}
+
+#summary(cr.mod)
+```
+```{r, echo=FALSE}
+
+ggplot(lcbh.data) +
+  geom_point(aes(x=DBH.cm, y=CR))+
+  labs(x='DBH', y='Crown Ratio')
+
+```
+
+The result is that the height model and constant crown ratio can be used to estimate a reasonable LCBH model between about 8-25 cm DBH. The following figure shows height and LCBH observations along with the fitted models. For small trees, we might question the assumption of constant CR. As Holdaway (1986) noted, crown ratios tend to increase with diameter before levelling off near maturity; for small, suppressed trees within a taller stand, crown ratios are expected to be lower due to intense light competition. However, the overall incidence and contribution of smaller pine individuals in the experimental plots was minimal, so this likely represents a very minor factor in estimation of plot height and LCBH estimates. 
+
+
+```{r, echo=FALSE}
+#JP height and lcbh models
+ggplot(data=data.frame(x=seq(0.1, 30))) +
+  coord_cartesian(xlim=c(0, 30), ylim=c(0, 25))+
+  labs(x='DBH', y='m') +
+  geom_point(data=lcbh.data, aes(x=DBH.cm, y=Ht.m), colour='red')+
+  stat_function(aes(x=x), fun=sharma.jp, n=200, colour='red')+
+  stat_function(aes(x=x), fun=lcbh.sharma.cr, n=200, colour='blue') +
+  geom_point(data=lcbh.data, aes(x=DBH.cm, y=LCBH.m), colour='blue')+ 
+  geom_text(label="JP LCBH", x=15, y=5, colour='blue')+
+  geom_text(label="JP Height", x=12, y=20, colour='red')
+
+```
+
+Despite the evidence for constant crown ratio across all tree sizes, there remains considerable variability around the mean model prediction line, particularly for LCBH. The LCBH of individual larger trees clearly can vary by 2-3 m or more at any given DBH. This highlights the importance of having an adequate sample size in these types of biomass studies.
+
+##Part 2: Kenshoe Lake Experimental Burn Plots
+
+The models above were then used together with the stand cruise data from the Kenshoe Lake plots (number of stems/ha by DBH class) to predict height and LCBH for individual burn plots. Plot-level LCBH values were computed by modelling cohort heights and then calculating the weighted mean LCBH using the fixed crown ratio model. Because of the variation in tree sizes (dbh and height), within each plot, size classes were weighted by basal area to produce overall plot-level stand metrics. By weighting by basal area, this yields estimates of Lorey's height as well as an analogous LCBH measure (BA-weighted LCBH) for each plot. 
+
+The following table shows the example of the raw cruise data for Plot 1, converted to metric measurements. The columns are as follows: experimental plot, DBH midpoints (in cm), jack pine density (stems/ha), spruce density (stems/ha). As noted previously, no LCBH measurements were collected for black spruce. 
+
+```{r echo=FALSE, paged.print=FALSE}
+plot1.jp <- jp.data %>% filter(plot=='p01')
+plot1.sp <- spruce.data %>% filter(plot=='p01')
+
+plot1 <- left_join(plot1.jp, plot1.sp, by='X')
+plot1 %>% select(-c(X, dbh.mid.y, plot.y)) %>%
+  rename(plot=plot.x, dbh.mid=dbh.mid.x, jp.st.ha=st.ha.x, sp.st.ha=st.ha.y)
+
+```
+
+```{r echo=FALSE}
+#Plot modelling
+
+#Join spruce and pine data
+combined <- full_join(jp.data, spruce.data, by=c('plot', 'dbh.mid')) %>% 
+  select(-X.x, -X.y)
+
+#Calculate BA
+combined.ba <- mutate(combined, ba=(dbh.mid/2)^2*pi/10000, 
+                      ba.st.jp=ba*st.ha.x, 
+                      ba.st.sp=ba*st.ha.y, 
+                      ba.all=ba.st.jp+ba.st.sp)
+
+#Calculate plot-summary BA and stem density, assign to plot cohorts
+total.ba <- combined.ba %>% 
+  group_by(plot) %>% 
+  dplyr::summarize(sum.ba=sum(ba.all)) %>% pull(sum.ba) 
+
+spruce.ba <- combined.ba %>%
+  group_by(plot) %>%
+  dplyr::summarize(sp.ba=sum(ba.st.sp)) %>% pull(sp.ba)
+
+total.st.ha <- combined.ba %>% 
+  group_by(plot) %>% 
+  dplyr::summarize(sum.st=sum(st.ha.x+st.ha.y)) %>% pull(sum.st)
+
+ba.long <- rep(total.ba, each=14)
+st.long <- rep(total.st.ha, each=14)
+
+combined.full <- mutate(combined.ba, 
+                       ba.plot=ba.long, 
+                       st.plot=st.long)
+
+u_jp <- summary(jp.Chap)$coef[[1]]
+
+
+sharma.plot.jp <- function(sht=17.7, tph, ba, dbh) {
+  ht = 1.3 + (theta1 + u_jp)*sht^delta1 * (1-exp(-beta1*((tph/ba)^phi1)*dbh))^gamma1
+  return(ht)
+}
+
+u_bs <- summary(bs.Chap)$coef[[1]]
+
+sharma.plot.bs <- function(sht=8, tph, ba, dbh) {
+  ht = 1.3 + (theta2 + u_bs)*sht^delta2 * (1-exp(-beta2*((tph/ba)^phi2)*dbh))^gamma2
+  return(ht)
+}
+
+#Predict heights and lcbh for spruce, pine
+sp.lcbh=0.5
+
+combined.pred2 <- rowwise(mutate(combined.full, 
+                         h.jp=sharma.plot.jp(tph=st.plot, ba=ba.plot, dbh=dbh.mid),
+                         lcbh.jp=lcbh.cr(h.jp),
+                         h.sp=sharma.plot.bs(tph=st.plot, ba=ba.plot, dbh=dbh.mid),
+                         lcbh.sp=sp.lcbh))
+                         
+
+#stem-based weighting
+sum.plots.stem <- combined.pred2 %>% 
+  group_by(plot) %>%
+  dplyr::summarize(wH.jp=wtd.mean(h.jp, weights=st.ha.x), 
+                   wLCBH.jp=wtd.mean(lcbh.jp, weights=st.ha.x),
+                   wH.sp=wtd.mean(h.sp, weights=st.ha.y),
+                   wLCBH.sp=sp.lcbh,
+                   st.jp=sum(st.ha.x),
+                   st.sp=sum(st.ha.y)) %>%
+  mutate(wLCBH.com=(wLCBH.jp*st.jp/(st.jp+st.sp)) + 
+                     (wLCBH.sp*st.sp/(st.jp+st.sp)) )
+                   
+#BA-based weighting (Lorey's height)
+sum.plots.lh <- combined.pred2 %>% 
+  group_by(plot) %>%
+  dplyr::summarize(LH.jp=wtd.mean(h.jp, weights=ba.st.jp), 
+                   LLCBH.jp=wtd.mean(lcbh.jp, weights=ba.st.jp),
+                   LH.sp=wtd.mean(h.sp, weights=ba.st.sp),
+                   LLCBH.sp=sp.lcbh,
+                   ba.jp=sum(ba.st.jp),
+                   ba.sp=sum(ba.st.sp)) %>%
+  mutate(LLCBH.com=(LLCBH.jp*ba.jp/(ba.jp+ba.sp)) +
+                     (LLCBH.sp*ba.sp/(ba.jp+ba.sp)) )
+
+FSG.adj = 0.75
+
+#fix
+kenshoe.bothMethods <- left_join(sum.plots.stem, sum.plots.lh, by='plot') %>%
+  mutate(FSG.LH = LLCBH.jp-LH.sp*FSG.adj)
+
+```
+###Heights and LCBH: Weighting by Density vs Basal Area
+
+Since the plot cruise data contains trees from a range of sizes, the question naturally arises as to how to represent the overall stand structure. Here we present the analysis using a weighted mean function that weighs individual tree measurements (height or LCBH) according to two criteria: stem density (S), in trees or stems per hectare, and basal area (BA). Weighing by BA produces Lorey's height (LH) and we hereby refer to BA-weighted LCBH as Lorey's LCBH (LLCBH); weighting by stem density produces SH and SLCBH. Since crown fire behaviour involves the full crown silhouette in 2- or 3-dimensional space, we favour the use of the BA-weighted (Lorey's) measures in these fuel structure calculations.  
+
+Plot-level estimates of height and LCBH are shown in the following table. Suffixes refer to jack pine (.jp), black spruce (.sp), or both species combined (.com), respectively. Black spruce LCBH of 0.5 m is assumed regardless of weighting method. 
+
+
+```{r echo=FALSE, paged.print=FALSE}
+#Fixed
+
+kenshoe.bothMethods %>%
+  mutate(plot=1:12) %>%
+  rename(SH.jp=wH.jp, SLCBH.jp=wLCBH.jp, SH.sp=wH.sp, LCBH.sp=wLCBH.sp, 
+         SLCBH.com=wLCBH.com) %>%
+  select(-c(LLCBH.sp, FSG.LH, LCBH.sp, SLCBH.com, LLCBH.com))
+
+kenshoe.bothMethods %>%
+  mutate(plot=1:12) %>%
+  select(plot, SLCBH.com=wLCBH.com, LLCBH.com)
+
+
+#write.csv(kenshoe.bothMethods %>% select(plot, FSG.LH) %>% mutate(plot=1:12), 
+#         'c:/Dan/_Remote_projects/ccp_2021/analysis/models_outputs/kenshoe_fsg_sharma2.csv')
+
+
+```
+
+###Effective LCBH: the Fuel Strata Gap (FSG)
+
+For crown fire modelling we introduce one additional measure of interest: the fuel strata gap (FSG). FSG has been defined in a few different studies, but for present purposes is used to mean the mean height between distinct crown fuel layers (adjusted if necessary). For the stands at Kenshoe Lake, the FSG is considered the size of gap between the top (or upper region) of the understory conifer layer, in this case comprised of black spruce, and the bottom of the overstory conifer (ie LCBH), in this case jack pine. Since the crown fuel mass is very low at the tops of trees, and often offset horizontally for the tallest spruce trees compared to the nearest pine overstory branches, we reasoned that the top of the lower crown fuel stratum should be below the absolute tree heights for understory conifers. We assumed that the threshold height encompassing approximately 90% of cumulative biomass would be appropriate, which is approximately reached at  75% of tree height in spruce species (Alexander et al. 2004, Tavainen and Forss 2008). Thus, the FSG was measured as the jack pine LCBH minus black spruce mean height times 0.75.  
+
+It is also worth considering whether all plots contained sufficient black spruce to consider it a distinct fuel stratum (as opposed to scattered ladder fuels, for instance), although this discussion is beyond the scope of the present discussion. 
+
+```{r echo=FALSE, paged.print=FALSE}
+kenshoe.bothMethods %>% select(plot, FSG.LH) %>% mutate(plot=1:12) %>% round(2)
+
+# write.csv(kenshoe.bothMethods %>% select(plot, FSG.LH) %>% mutate(plot=1:12), 
+#          'c:/Dan/_Remote_projects/ccp_2021/analysis/models_outputs/kenshoe_fsg_sharma.csv')
+
+```
+
+The overall crown structure of the Kenshoe Lake stands can be visualized using the following violin plots. These figures show the overall structure (BA-weighted) for the site as a whole (all data pooled) and for individual plots, again assuming spruce LCBH of 0.5 m for all measured individuals. Symbols denote mean values, while horizontal lines show the 10th and 90th percentiles for height, and LCBH for pine (spruce: approx. 5.5 and 13.5 m for 10th and 90th height percentiles, respectively). 
+
+For creating BA-weighted plots, the density x BA measures for each DBH class were expanded to simulate hundreds of individual 'basal area unit' observations. The plot means generated this way are virtually identical to the more exact 'weighted mean' values calculated previously, but allow for the spread of values to be displayed more readily. 
+
+```{r echo=FALSE, warning=FALSE}
+pl <- rep(1:12, each=14)
+#pl2 <- c(pl, pl)
+
+#add column of integer weights that is somewhat close to the BA-based weighting
+combined.pred3 <- combined.pred2 %>% ungroup() %>%
+  mutate(plot=pl, 
+         wt.jp=round(ba.st.jp*10, 0),
+         wt.sp=round(ba.st.sp*10, 0))
+
+#Vector of heights, LCBH
+jp.ht.vec <- combined.pred3 %>% slice(1:14) %>% pull(h.jp)
+jp.lcbh.vec <-combined.pred3 %>% slice(1:14) %>% pull(lcbh.jp)
+
+sp.ht.vec <- combined.pred3 %>% slice(1:14) %>% pull(h.sp)
+sp.lcbh.vec <- rep(sp.lcbh, 14)
+
+#blank lists
+jp.loop <- list()
+jp.ht.long <- list()
+jp.lcbh.long <- list()
+sp.loop <- list()
+sp.ht.long <- list()
+sp.lcbh.long <- list()
+
+
+#loop - to expand weighing of trees by BA (approx.)
+for(loop in 1:12) {
+  jp.loop[[loop]] <- filter(combined.pred3, plot==loop) %>% pull(wt.jp)
+  jp.ht.long[[loop]] <- rep(jp.ht.vec, times=jp.loop[[loop]])
+  jp.lcbh.long[[loop]] <- rep(jp.lcbh.vec, times=jp.loop[[loop]])
+  sp.loop[[loop]] <- filter(combined.pred3, plot==loop) %>% pull(wt.sp)
+  sp.ht.long[[loop]] <- rep(sp.ht.vec, times=sp.loop[[loop]])
+  sp.lcbh.long[[loop]] <- rep(sp.lcbh.vec, times=sp.loop[[loop]])
+}
+
+#Add NAs to make all lists same length
+jp.ht.square <- lapply(jp.ht.long, `length<-`, max(lengths(jp.ht.long)))
+#Unlist to make a big vector
+jp.allhts.vec <-unlist(jp.ht.square)
+
+#Add NAs to make all list items same length
+jp.lcbh.square <- lapply(jp.lcbh.long, `length<-`, max(lengths(jp.lcbh.long)))
+#Unlist to make a big vector
+jp.alllcbh.vec <- unlist(jp.lcbh.square)
+
+#same for spruce
+sp.ht.square <- lapply(sp.ht.long, `length<-`, max(lengths(sp.ht.long)))
+sp.allhts.vec <- unlist(sp.ht.square)
+sp.lcbh.square <- lapply(sp.lcbh.long, `length<-`, max(lengths(sp.lcbh.long)))
+sp.alllcbh.vec <- unlist(sp.lcbh.square)
+
+
+#create plot vector numbers
+plot.vec.jp <- rep(1:12, each=max(lengths(jp.ht.long)))
+plot.vec.sp <- rep(1:12, each=max(lengths(sp.ht.long)))
+
+#Create data frame with final observations of heights and LCBH, weighted by BA
+ken.struc.jp <- data.frame(plot=as.factor(plot.vec.jp), ht=jp.allhts.vec, lcbh=jp.alllcbh.vec)
+
+#melt ht and lcbh to a long variable column - Note; melt function may not work for long; reshape2? Will need 'pivot' in the future
+long.struc.jp <- reshape2::melt(ken.struc.jp, id.vars='plot') %>%
+  mutate(spc='jp')
+
+ken.struc.sp <- data.frame(plot=as.factor(plot.vec.sp), ht=sp.allhts.vec, lcbh=sp.alllcbh.vec)
+long.struc.sp <- reshape2::melt(ken.struc.sp, id.vars='plot') %>%
+  mutate(spc='sp')
+
+combined.struc <- rbind(long.struc.jp, long.struc.sp)
+combined.struc2 <- mutate(combined.struc, type=paste0(spc, '-', variable)) %>%
+  select(-c(variable, spc)) %>%
+  filter(!is.na(value)) %>%
+  mutate(type=as.factor(type)) %>%
+  rename(height=value)
+
+
+#graphs 
+  
+#All plots combined plus 10/90 quantiles; scale_x argument spaces out pine and spruce
+all.graph <- ggplot(combined.struc2, aes(x=type, y=height)) +
+    scale_x_discrete(limits=c('jp-ht', 'jp-lcbh', '', 'sp-ht', 'sp-lcbh')) +
+    geom_violin(aes(fill=type), adjust=2, scale='count', width=6,
+                draw_quantiles=c(0.1, 0.9), na.rm=TRUE) + 
+    stat_summary(aes(shape=type), fun='mean')
+
+all.graph
+
+#plots shown individually
+ggplot(combined.struc2, aes(x=plot, y=height))+
+    geom_violin(aes(x=plot, fill=type)) +
+    stat_summary(aes(shape=type), fun='mean', position=position_dodge(width=1))
+
+```
+
+##Discussion and Conclusion
+In this analysis, the stand structure was described in detail, showing both similarities and differences between plots. The jack pine overstory, accounting for 88% of the total basal area, was remarkably consistent between plots. Modelled Lorey's height varied between 16.8 and 17.7 m, with BA-weighted LCBH between 11.1 and 11.7 m. The spruce component was more variable, with modelled Lorey's heights between 7.9 and 11.1 m and greater within-plot height variability. The basal area of spruce also varied between 3.8 and 19.1 % of stand total, suggesting between-plot differences in the ladder fuel loading; these values are in line with estimated crown fuel loads previously described by Stocks (1989). 
+
+Calculated FSG, based on the assumptions discussed above, ranged from 3.2 to 5.6 m. The assumption that the top of the spruce layer is properly represented by 75% of tree height (approx. 90% of CFL) is untested. However, these FSG values are quite close to the gap between the (unadjusted) stem-weighted LCBH and spruce height (mean absolute difference: 0.50 m). It is unclear if this is coincidental, but does add some confidence to the use of these FSG values in crown fire modelling. Recall that previous studies reported only overall mean values for site LCBH, while generally acknowledging the difficulties representing the two-stratum crown fuel layer. Notably, Van Wagner's (1993) study of crown fire in these stands assumed a blanket 2 m LCBH for all stands for calculating the critical fire intensity for crowning (ISO), a compromise value primarily representing the spruce cohort, while noting that the pine LCBH was about 12 m. The 2 m value was also used in Cruz et al. 2003, 2004, while the FBP System (which only considered those fires that crowned into the pine layer as crown fires), inclued the Kenshoe stands among the C-3 fuel type, which were all assigned LCBH of 8 m (FCFDG 1992). In contrast, the FSG calculations shown here are only meaningful for predicting crowning into the pine layer, a process facilitated by the spruce layer, as noted by Stocks (1989). Predicting torching or intermittent crowning in the spruce layer would ideally require better information on the spruce LCBH; whether 0.5 m or 2 m are preferable estimates are presently a matter of judgment and conjecture.   
+
+Ultimately, this analysis was completed to generate inputs for generalized fire behaviour modelling in conifer stands. When the overstory is variable and multilayered, the experimental plot scale is increasingly at odds with the scale of individual fuel elements, the scale of trees and branches (Keane 2014); we expect fine-scale fire behaviour patterns in variable stands to be increasingly uncertain and probabilistic. This concern, however, is beyond the scope of the present analysis. The spruce crown fuels in these mature pine and spruce stands are typically 3-6 m below the lower limit of the pine crown fuels, and this gap is surely important in crown fire initiation, where the whole canopy is concerned.  
+
+##References
+Cruz, M. G., M. E. Alexander, and R. H. Wakimoto. 2003. Assessing the probability of crown fire initiation based on fire danger indices. Forestry Chronicle 79:976-983.
+
+Cruz, M. G., M. E. Alexander, and R. H. Wakimoto. 2004. Modeling the likelihood of crown fire occurrence in conifer forest stands. Forest Science 50:640-658.
+
+De Groot, W. 1993. Examples of fuel types in the Canadian Forest Fire Behavior Prediction (FBP) System [poster with text]. Forestry Canada, Northwest Region, Northern Forestry Centre, Edmonton, Alberta, Canada.
+
+Forestry Canada Fire Danger Group. 1992. Development and structure of the Canadian Forest Fire Behavior Prediction System. Information Report ST-X-3, Forestry Canada, Science and Sustainable Development Directorate, Ottawa, Ontario, Canada.
+
+Holdaway, M. R. 1986. Modeling tree crown ratio. The Forestry Chronicle 62:451-455.
+
+Keane, R. E. 2015. Wildland fuel fundamentals and applications. Springer.
+
+Perrakis, D. D. B., M. G. Cruz, M. E. Alexander, S. W. Taylor, and J. L. Beverly. 2020. Linking Dynamic Empirical Fire Spread Models: Introducing Canadian Conifer Pyrometrics. Proceedings from the 6th Fuels and Fire Behaviour Conference, 29 April-03 May 2019, Marseille, France. International Association of Wildland Fire.
+
+Sharma, M., and J. Parton. 2007. Height-diameter equations for boreal tree species in Ontario using a mixed-effects modeling approach. Forest Ecology and Management 249:187-198.
+
+Stocks, B. J. 1989. Fire behavior in mature jack pine. Canadian Journal of Forest Research 19:783-790.
+
+Van Wagner, C. E. 1993. Prediction of Crown Fire Behavior in two Stands of Jack Pine. Canadian Journal of Forest Research 23:442-449.
+
+Walker, J. D., and B. J. Stocks. 1975. The fuel complex of mature and immature jack pine stands in Ontario. Report O-X-229, Canadian Forestry Service, Department of the Environment, Great Lakes Forest Research Centre, Sault Ste. Marie, Ontario, Canada.
